@@ -202,8 +202,8 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 
 CELERY_BEAT_SCHEDULE = {
-    'print-every-15-seconds': {
-        'task': 'prefecture_project_manager.tasks.print_console_message',
-        'schedule': 15.0,
+    'list-emails_every_60_seconds': {
+        'task': 'prefecture_project_manager.tasks.list_emails',
+        'schedule': 60.0,
     },
 }

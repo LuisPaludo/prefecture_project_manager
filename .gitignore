@@ -2,6 +2,13 @@
 static
 staticfiles
 .env
+credentials.json
+token.*
+client_secret_*
+
+email_reader_google.py
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
