@@ -13,18 +13,42 @@ from typing import List, Optional
 from email_reader.migrations.interface.message_interface import GmailListMessagesResponse, GmailMessageMetadata, \
     GmailMessage, MessagePayload, MessageHeader, MessagePart, MessageBody
 
-# If modifying these scopes, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
-@shared_task(name='prefecture_project_manager.tasks.list_emails')
-def list_emails():
-    creds = None
-    # The file token.json stores the user's access and refresh tokens, and is
-    # created automatically when the authorization flow completes for the first
-    # time.
+def get_text_from_parts(parts: List[MessagePart] | None) -> Optional[str]:
+    text = ""
+    for part in parts:
+        if part.get('mimeType') == 'text/plain':
+            body_data: Optional[str] = part.get('body', {}).get('data')
+            if body_data:
+                data = body_data.replace("-", "+").replace("_", "/")
+                decoded_data = base64.b64decode(data)
+                text += decoded_data.decode('utf-8', errors='replace')
+
+        # Recursively check nested parts
+        if part.get('parts'):
+            text += get_text_from_parts(part['parts'])
+
+    return text
+
+def get_email_content(message: GmailMessage) -> str:
+    payload = message.get('payload', {})
+
+    if payload.get('body', {}).get('data'):
+        body_data = payload['body']['data']
+        data = body_data.replace("-", "+").replace("_", "/")
+        decoded_data = base64.b64decode(data)
+        return decoded_data.decode('utf-8', errors='replace')
+
+    elif payload.get('parts'):
+        return get_text_from_parts(payload['parts'])
+
+    return "No readable content found"
+
+def get_credentials() -> Credentials:
+    creds: Credentials | None = None
     if os.path.exists("email_reader/token.json"):
         creds = Credentials.from_authorized_user_file("email_reader/token.json", SCOPES)
-    # If there are no (valid) credentials available, let the user log in.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
@@ -33,50 +57,72 @@ def list_emails():
                 "email_reader/credentials.json", SCOPES
             )
             creds = flow.run_local_server(port=0)
-        # Save the credentials for the next run
         with open("email_reader/token.json", "w") as token:
             token.write(creds.to_json())
 
-    try:
-        service = build("gmail", "v1", credentials=creds)
-        q = 'from:(atendimento.corporativo@copel.com)'
-        result: GmailListMessagesResponse = service.users().messages().list(userId='me').execute()
-        messages: Optional[List[GmailMessageMetadata]] = result.get('messages')
+    return creds
 
-        if not messages:
-            print("No labels found.")
-            return
+def get_messages(creds: Credentials, q: str) -> List[GmailMessage] | None:
+    service = build("gmail", "v1", credentials=creds)
+    result: GmailListMessagesResponse = service.users().messages().list(userId='me', q=q).execute()
+    messages_ids = result.get('messages')
+
+    if not messages_ids:
+        print("No messages found.")
+        return None
+
+    messages: List[GmailMessage] = []
+
+    def add(id: int | None = None, msg: GmailMessage | None = None, err: str | None = None) -> None:
+        if err:
+            print(err)
+        else:
+            messages.append(msg)
+
+    batch = service.new_batch_http_request()
+    for msg in messages_ids:
+        batch.add(service.users().messages().get(userId='me', id=msg['id']), add)
+    batch.execute()
+
+    return messages
+
+@shared_task(name='prefecture_project_manager.tasks.list_emails')
+def list_emails():
+    creds = get_credentials()
+    q = 'from:(atendimento.corporativo@copel.com)'
+
+    try:
+        messages = get_messages(creds, q)
         for msg in messages:
             try:
-                txt: GmailMessage = service.users().messages().get(userId='me', id=msg['id']).execute()
+                # Get headers
+                payload = msg['payload']
+                headers = payload['headers']
 
-                payload: MessagePayload = txt['payload']
-                headers: List[MessageHeader] = payload['headers']
-
-                subject: str = ""
-                sender: str = ""
+                # Look for Subject and Sender Email in the headers
+                subject = ""
+                sender = ""
+                date = ""
                 for d in headers:
                     if d['name'] == 'Subject':
                         subject = d['value']
                     if d['name'] == 'From':
                         sender = d['value']
+                    if d['name'] == 'Date':
+                        date = d['value']
 
-                parts: MessagePart = payload.get('parts', [])[0]
-                body: MessageBody = parts.get('body')
-                data: Optional[str] = body.get('data') if body else None
+                print(f"ID: {msg['id']}")
+                print(f"Subject: {subject}")
+                print(f"From: {sender}")
+                print(f"Date: {date}")
 
-                print("Subject: ", subject)
-                print("From: ", sender)
+                content = get_email_content(msg)
+                print(f"Content:\n{content}\n")
 
-                if data is not None:
-                    data = data.replace("-", "+").replace("_", "/")
-                    decoded_data: bytes = base64.b64decode(data)
-                    decoded_data_str: str = decoded_data.decode('utf-8')
-                    print("Message: ", decoded_data_str)
-                else:
-                    print('\n')
-            except:
-                pass
+                print("-" * 80)
+
+            except Exception as e:
+                print(f"Error processing message: {e}")
 
     except HttpError as error:
         # TODO(developer) - Handle errors from gmail API.
